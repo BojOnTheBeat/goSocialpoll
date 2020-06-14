@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,4 +92,58 @@ func makeRequest(req *http.Request, params url.Values) (*http.Response, error) {
 	req.Header.Set("Content-Length", strconv.Itoa(len(formEnc)))
 	req.Header.Set("Authorization", authClient.AuthorizationHeader(creds, "POST", req.URL, params))
 	return httpClient.Do(req)
+}
+
+type tweet struct { // we only really care about the text of a tweet
+	Text string
+}
+
+func readFromTwitter(votes chan<- string) {
+	options, err := loadOptions()
+	if err != nil {
+		log.Println("failed to load options:", err)
+		return
+	}
+	u, err := url.Parse("https://stream.twitter.com/1.1/statuses/filter.json")
+
+	if err != nil {
+		log.Println("creating filter request to twitter failed:", err)
+		return
+	}
+
+	query := make(url.Values)
+	query.Set("track", strings.Join(options, ","))
+	req, err := http.NewRequest("POST", u.String(), strings.NewReader(query.Encode()))
+
+	if err != nil {
+		log.Println("creating filter request fialed:", err)
+		return
+	}
+
+	resp, err := makeRequest(req, query)
+
+	if err != nil {
+		log.Println("making request failed:", err)
+		return
+	}
+	reader := resp.Body
+	decoder := json.NewDecoder(reader)
+
+	for {
+		var t tweet
+
+		if err := decoder.Decode(&t); err != nil {
+			break
+		}
+
+		for _, option := range options {
+			if strings.Contains(
+				strings.ToLower(t.Text),
+				strings.ToLower(option),
+			) {
+				log.Println("vote:", option)
+				votes <- option
+			}
+		}
+	}
 }
