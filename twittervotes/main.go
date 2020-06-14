@@ -2,6 +2,11 @@ package main
 
 import (
 	"log"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/bitly/go-nsq"
 
@@ -62,5 +67,46 @@ func publishVotes(votes <-chan string) <-chan struct{} {
 }
 
 func main() {
+	// This is all code that handles graceful termination of the program
+	var stoplock sync.Mutex // protects stop
+	stop := false
+	stopChan := make(chan struct{}, 1)
+	signalChan := make(chan os.Signal, 1)
+
+	go func() {
+		<-signalChan // this means if we ever get something from signalchan, we want to do stuff
+		stoplock.Lock()
+		stop = true
+		stoplock.Unlock()
+		log.Println("Stopping...")
+		stopChan <- struct{}{}
+		closeConn()
+	}()
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+
+	if err := dialdb(); err != nil {
+		log.Fatalln("failed to dial MongoDB:", err)
+	}
+	defer closedb()
+
+	// start things
+	votes := make(chan string) // chan for votes
+	publisherStoppedChan := publishVotes(votes)
+	twitterStoppedChan := startTwitterStream(stopChan, votes)
+	go func() {
+		for {
+			time.Sleep(1 * time.Minute)
+			closeConn()
+			stoplock.Lock()
+			if stop {
+				stoplock.Unlock()
+				return
+			}
+			stoplock.Unlock()
+		}
+	}()
+	<-twitterStoppedChan
+	close(votes)
+	<-publisherStoppedChan
 
 }
